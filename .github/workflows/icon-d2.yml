@@ -1,0 +1,70 @@
+name: ICON-D2 Regenvorhersage
+
+on:
+  schedule:
+    # ICON-D2 rechnet um 00, 03, ... UTC und ist etwa 1,5 Stunden später fertig.
+    # Der Job läuft 2,5 Stunden nach jedem Lauf und nimmt den neuesten vollständigen.
+    - cron: "30 2,5,8,11,14,17,20,23 * * *"
+    # Hält den Zeitplan am Leben (GitHub schaltet Zeitpläne nach 60 Tagen ohne Aktivität ab)
+    - cron: "0 5 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: icon-d2
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install numpy
+
+      - name: Daten holen und umrechnen
+        if: github.event.schedule != '0 5 * * 1'
+        run: python icon_d2_job.py --out out
+
+      - name: Auf das Webhosting hochladen
+        if: github.event.schedule != '0 5 * * 1'
+        env:
+          FTP_PROTOCOL: ${{ secrets.FTP_PROTOCOL }}   # sftp oder ftp (ftp wird mit TLS verlangt)
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          FTP_DIR: ${{ secrets.FTP_DIR }}
+        run: |
+          sudo apt-get install -y --no-install-recommends lftp >/dev/null
+          proto="${FTP_PROTOCOL:-sftp}"
+          dir="${FTP_DIR:-.}"
+          tls=""
+          if [ "$proto" = "ftp" ]; then tls="set ftp:ssl-force true; set ftp:ssl-protect-data true; set ssl:verify-certificate yes;"; fi
+          # Erst unter vorläufigem Namen hochladen, dann umbenennen: die App sieht nie halbe Dateien.
+          lftp -u "$FTP_USER","$FTP_PASSWORD" "$proto://$FTP_HOST" <<LFTP
+          set net:max-retries 3
+          set net:timeout 30
+          set sftp:auto-confirm yes
+          $tls
+          cd "$dir"
+          put out/icon_d2.bin.gz -o icon_d2.bin.gz.tmp
+          mv -f icon_d2.bin.gz.tmp icon_d2.bin.gz
+          put out/latest.json -o latest.json.tmp
+          mv -f latest.json.tmp latest.json
+          bye
+          LFTP
+
+      - name: Lebenszeichen (leerer Commit, damit der Zeitplan aktiv bleibt)
+        if: github.event.schedule == '0 5 * * 1'
+        run: |
+          git config user.name "icon-d2-job"
+          git config user.email "icon-d2-job@users.noreply.github.com"
+          git commit --allow-empty -m "Lebenszeichen"
+          git push
