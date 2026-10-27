@@ -55,9 +55,11 @@ jobs:
           $tls
           cd "$dir"
           put out/icon_d2.bin.gz -o icon_d2.bin.gz.tmp
-          mv -f icon_d2.bin.gz.tmp icon_d2.bin.gz
+          rm -f icon_d2.bin.gz
+          mv icon_d2.bin.gz.tmp icon_d2.bin.gz
           put out/latest.json -o latest.json.tmp
-          mv -f latest.json.tmp latest.json
+          rm -f latest.json
+          mv latest.json.tmp latest.json
           bye
           LFTP
 
