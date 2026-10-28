@@ -2,9 +2,9 @@ name: ICON-D2 Regenvorhersage
 
 on:
   schedule:
-    # ICON-D2 rechnet um 00, 03, ... UTC und ist etwa 1,5 Stunden später fertig.
-    # Der Job läuft 2,5 Stunden nach jedem Lauf und nimmt den neuesten vollständigen.
-    - cron: "30 2,5,8,11,14,17,20,23 * * *"
+    # ICON-D2 und ICON-EU erscheinen zu unterschiedlichen Zeiten. Der Job prüft stündlich und lädt nur,
+    # wenn ein neuer Lauf da ist.
+    - cron: "40 * * * *"
     # Hält den Zeitplan am Leben (GitHub schaltet Zeitpläne nach 60 Tagen ohne Aktivität ab)
     - cron: "0 5 * * 1"
   workflow_dispatch: {}
@@ -79,7 +79,7 @@ jobs:
             done
             echo "bye"
           } > upload.lftp
-          lftp -u "$FTP_USER","$FTP_PASSWORD" "$proto://$FTP_HOST" -f upload.lftp
+          lftp -u "$FTP_USER","$FTP_PASSWORD" "$proto://$FTP_HOST" < upload.lftp
           rm -f upload.lftp
 
       - name: Lebenszeichen (leerer Commit, damit der Zeitplan aktiv bleibt)
