@@ -16,10 +16,14 @@ concurrency:
   group: icon-d2
   cancel-in-progress: false
 
+env:
+  # Hier liegen die fertigen Dateien. Ist der neueste Lauf dort schon da, wird nichts neu geladen.
+  PUBLISHED_URL: https://regenradar-daten.fabianwalter.com
+
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -29,9 +33,19 @@ jobs:
 
       - run: pip install numpy
 
-      - name: Daten holen und umrechnen
+      - name: Programme installieren (lftp, libaec)
         if: github.event.schedule != '0 5 * * 1'
-        run: python icon_d2_job.py --out out
+        run: sudo apt-get install -y --no-install-recommends lftp libaec0 >/dev/null
+
+      - name: ICON-D2 holen und umrechnen (48 Stunden)
+        if: github.event.schedule != '0 5 * * 1'
+        run: python icon_d2_job.py --model d2 --out out
+
+      - name: ICON-EU holen und umrechnen (bis +5 Tage)
+        if: github.event.schedule != '0 5 * * 1'
+        # Ein Fehler hier soll die 48-Stunden-Vorhersage nicht verhindern
+        continue-on-error: true
+        run: python icon_d2_job.py --model eu --out out
 
       - name: Auf das Webhosting hochladen
         if: github.event.schedule != '0 5 * * 1'
@@ -42,26 +56,31 @@ jobs:
           FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
           FTP_DIR: ${{ secrets.FTP_DIR }}
         run: |
-          sudo apt-get install -y --no-install-recommends lftp >/dev/null
+          shopt -s nullglob
+          files=(out/*.gz out/*.json)
+          if [ ${#files[@]} -eq 0 ]; then echo "Nichts Neues hochzuladen"; exit 0; fi
           proto="${FTP_PROTOCOL:-sftp}"
-          dir="${FTP_DIR:-.}"
-          tls=""
-          if [ "$proto" = "ftp" ]; then tls="set ftp:ssl-force true; set ftp:ssl-protect-data true; set ssl:verify-certificate yes;"; fi
-          # Erst unter vorläufigem Namen hochladen, dann umbenennen: die App sieht nie halbe Dateien.
-          lftp -u "$FTP_USER","$FTP_PASSWORD" "$proto://$FTP_HOST" <<LFTP
-          set net:max-retries 3
-          set net:timeout 30
-          set sftp:auto-confirm yes
-          $tls
-          cd "$dir"
-          put out/icon_d2.bin.gz -o icon_d2.bin.gz.tmp
-          rm -f icon_d2.bin.gz
-          mv icon_d2.bin.gz.tmp icon_d2.bin.gz
-          put out/latest.json -o latest.json.tmp
-          rm -f latest.json
-          mv latest.json.tmp latest.json
-          bye
-          LFTP
+          {
+            echo "set net:max-retries 3"
+            echo "set net:timeout 30"
+            echo "set sftp:auto-confirm yes"
+            if [ "$proto" = "ftp" ]; then
+              echo "set ftp:ssl-force true"
+              echo "set ftp:ssl-protect-data true"
+              echo "set ssl:verify-certificate yes"
+            fi
+            echo "cd \"${FTP_DIR:-.}\""
+            # Erst unter vorläufigem Namen hochladen, dann umbenennen: die App sieht nie halbe Dateien.
+            for f in "${files[@]}"; do
+              b=$(basename "$f")
+              echo "put \"$f\" -o \"$b.tmp\""
+              echo "rm -f \"$b\""
+              echo "mv \"$b.tmp\" \"$b\""
+            done
+            echo "bye"
+          } > upload.lftp
+          lftp -u "$FTP_USER","$FTP_PASSWORD" "$proto://$FTP_HOST" -f upload.lftp
+          rm -f upload.lftp
 
       - name: Lebenszeichen (leerer Commit, damit der Zeitplan aktiv bleibt)
         if: github.event.schedule == '0 5 * * 1'
