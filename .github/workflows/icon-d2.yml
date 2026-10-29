@@ -53,6 +53,11 @@ jobs:
         continue-on-error: true
         run: python icon_d2_job.py --model wx --out out
 
+      - name: ICON-EU Wetterfelder holen (Tage 3-5)
+        if: github.event.schedule != '0 5 * * 1'
+        continue-on-error: true
+        run: python icon_d2_job.py --model wxeu --out out
+
       - name: Auf das Webhosting hochladen
         if: github.event.schedule != '0 5 * * 1'
         env:
