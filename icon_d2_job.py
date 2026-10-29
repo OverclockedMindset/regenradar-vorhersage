@@ -57,6 +57,12 @@ MODELS = {
         out="icon_eu.bin.gz", meta="latest_eu.json", fmt=2,
     ),
 }
+# Wetterfelder (Momentanwerte): Temperatur, Wind, Wolken. Grob gerastert, damit die Datei klein bleibt.
+WX_PARAMS = ("t_2m", "u_10m", "v_10m", "clct")
+MODELS["wx"] = dict(
+    path="icon-d2/grib/{hh}/{par}/icon-d2_germany_regular-lat-lon_single-level_{run}_{lead:03d}_2d_{par}.grib2.bz2",
+    runs_every=3, leads=list(range(0, 49)), block=8, out="icon_d2_wx.bin.gz", meta="latest_wx.json", fmt=3,
+)
 UA = "regenradar-icon-d2-job/1.0 (private project)"
 
 
@@ -218,6 +224,45 @@ def build(model: str, run: dt.datetime, leads: list, fields: list, grid: dict) -
     return head + b"".join(s.tobytes() for s in steps)
 
 
+def _block_mean(a: np.ndarray, block: int) -> np.ndarray:
+    """Mittelwert je block x block (NaN werden ignoriert; nur NaN -> NaN)."""
+    ny, nx = a.shape
+    ny2, nx2 = ny // block, nx // block
+    r = a[: ny2 * block, : nx2 * block].reshape(ny2, block, nx2, block)
+    ok = ~np.isnan(r)
+    n = ok.sum(axis=(1, 3))
+    tot = np.where(ok, r, 0.0).sum(axis=(1, 3))
+    return np.where(n > 0, tot / np.maximum(n, 1), np.nan)
+
+
+def build_wx(run: dt.datetime, leads: list, data: dict, grid: dict) -> bytes:
+    """data[par][i] = Feld zur Vorlaufzeit leads[i] (Süd->Nord). Je Zeitschritt vier Ebenen:
+    Temperatur (Byte = (°C + 40) * 2, 255 = ungültig), Wind u und v (Byte = m/s * 2 + 128, Richtung
+    "wohin", u = nach Osten, v = nach Norden), Bewölkung (Byte = Prozent, 255 = ungültig)."""
+    block = MODELS["wx"]["block"]
+    steps = []
+    for i in range(len(leads)):
+        planes = []
+        t = _block_mean(data["t_2m"][i], block)[::-1]
+        planes.append(np.where(np.isnan(t), 255, np.clip(np.rint((np.nan_to_num(t) - 273.15 + 40.0) * 2.0), 0, 254)).astype(np.uint8))
+        for par in ("u_10m", "v_10m"):
+            w = _block_mean(data[par][i], block)[::-1]
+            planes.append(np.where(np.isnan(w), 128, np.clip(np.rint(np.nan_to_num(w) * 2.0 + 128.0), 0, 255)).astype(np.uint8))
+        c = _block_mean(data["clct"][i], block)[::-1]
+        planes.append(np.where(np.isnan(c), 255, np.clip(np.rint(np.nan_to_num(c)), 0, 100)).astype(np.uint8))
+        steps.append(b"".join(p.tobytes() for p in planes))
+    ny2, nx2 = planes[0].shape
+    ny, nx = data["t_2m"][0].shape
+    off = (block - 1) / 2.0
+    lat_n_c = grid["lat_s"] + (ny - 1) * grid["dlat"] - (ny - ny2 * block) * grid["dlat"] - off * grid["dlat"]
+    lon_w_c = grid["lon_w"] + off * grid["dlon"]
+    head = b"RGN3" + struct.pack(
+        ">qHHffffBH", int(run.timestamp()), nx2, ny2,
+        lat_n_c, lon_w_c, grid["dlat"] * block, grid["dlon"] * block, len(steps), 60,
+    )
+    return head + b"".join(steps)
+
+
 # --- Download --------------------------------------------------------------------------------
 
 def _get(url: str, tries: int = 4) -> bytes:
@@ -242,9 +287,10 @@ def _exists(url: str) -> bool:
         return False
 
 
-def url_for(model: str, run: dt.datetime, lead: int) -> str:
+def url_for(model: str, run: dt.datetime, lead: int, par: str = "t_2m") -> str:
     cfg = MODELS[model]
-    return f"{BASE}/" + cfg["path"].format(hh=run.strftime("%H"), run=run.strftime("%Y%m%d%H"), lead=lead)
+    return f"{BASE}/" + cfg["path"].format(
+        hh=run.strftime("%H"), run=run.strftime("%Y%m%d%H"), lead=lead, par=par)
 
 
 def latest_complete_run(model: str, now: dt.datetime) -> dt.datetime:
@@ -260,16 +306,16 @@ def latest_complete_run(model: str, now: dt.datetime) -> dt.datetime:
     raise RuntimeError(f"kein vollständiger Lauf von {model} gefunden")
 
 
-def load_run(model: str, run: dt.datetime, local: str | None) -> tuple:
+def load_run(model: str, run: dt.datetime, local: str | None, par: str = "t_2m") -> tuple:
     """Lädt alle Vorlaufzeiten, schneidet auf CROP zu. Gibt (Felder, Gitter) zurück."""
     cfg = MODELS[model]
 
     def fetch(lead: int) -> bytes:
         if local:
-            name = os.path.basename(url_for(model, run, lead))
+            name = os.path.basename(url_for(model, run, lead, par))
             with open(os.path.join(local, name), "rb") as f:
                 return f.read()
-        return _get(url_for(model, run, lead))
+        return _get(url_for(model, run, lead, par))
 
     def one(lead: int):
         g = decode_grib(bz2.decompress(fetch(lead)))
@@ -321,8 +367,14 @@ def main() -> int:
         return 0
 
     t0 = time.time()
-    fields, grid = load_run(a.model, run, a.local)
-    raw = build(a.model, run, cfg["leads"], fields, grid)
+    if a.model == "wx":
+        data = {}
+        for par in WX_PARAMS:
+            data[par], grid = load_run("wx", run, a.local, par)
+        raw = build_wx(run, cfg["leads"], data, grid)
+    else:
+        fields, grid = load_run(a.model, run, a.local)
+        raw = build(a.model, run, cfg["leads"], fields, grid)
     os.makedirs(a.out, exist_ok=True)
     gz = gzip.compress(raw, compresslevel=9, mtime=0)
     tmp = os.path.join(a.out, cfg["out"] + ".tmp")
@@ -330,7 +382,7 @@ def main() -> int:
         f.write(gz)
     os.replace(tmp, os.path.join(a.out, cfg["out"]))
     meta = dict(
-        run=run_text, run_epoch=int(run.timestamp()), steps=len(cfg["leads"]) - 1,
+        run=run_text, run_epoch=int(run.timestamp()), steps=len(cfg["leads"]) - (0 if a.model == "wx" else 1),
         bytes=len(gz), created=dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
     with open(os.path.join(a.out, cfg["meta"]), "w") as f:
