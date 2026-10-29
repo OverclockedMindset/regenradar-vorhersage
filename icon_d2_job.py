@@ -63,6 +63,12 @@ MODELS["wx"] = dict(
     path="icon-d2/grib/{hh}/{par}/icon-d2_germany_regular-lat-lon_single-level_{run}_{lead:03d}_2d_{par}.grib2.bz2",
     runs_every=3, leads=list(range(0, 49)), block=8, out="icon_d2_wx.bin.gz", meta="latest_wx.json", fmt=3,
 )
+# ICON-EU: nur der Teil hinter den ersten 36 Stunden (davor gilt ICON-D2); ab +78 h im 3-Stunden-Takt
+MODELS["wxeu"] = dict(
+    path="icon-eu/grib/{hh}/{par}/icon-eu_europe_regular-lat-lon_single-level_{run}_{lead:03d}_{PAR}.grib2.bz2",
+    runs_every=12, leads=list(range(36, 79)) + list(range(81, 121, 3)), block=3,
+    out="icon_eu_wx.bin.gz", meta="latest_wx_eu.json", fmt=4,
+)
 UA = "regenradar-icon-d2-job/1.0 (private project)"
 
 
@@ -235,11 +241,12 @@ def _block_mean(a: np.ndarray, block: int) -> np.ndarray:
     return np.where(n > 0, tot / np.maximum(n, 1), np.nan)
 
 
-def build_wx(run: dt.datetime, leads: list, data: dict, grid: dict) -> bytes:
+def build_wx(run: dt.datetime, leads: list, data: dict, grid: dict, model: str = "wx") -> bytes:
     """data[par][i] = Feld zur Vorlaufzeit leads[i] (Süd->Nord). Je Zeitschritt vier Ebenen:
     Temperatur (Byte = (°C + 40) * 2, 255 = ungültig), Wind u und v (Byte = m/s * 2 + 128, Richtung
     "wohin", u = nach Osten, v = nach Norden), Bewölkung (Byte = Prozent, 255 = ungültig)."""
-    block = MODELS["wx"]["block"]
+    cfg = MODELS[model]
+    block = cfg["block"]
     steps = []
     for i in range(len(leads)):
         planes = []
@@ -256,10 +263,16 @@ def build_wx(run: dt.datetime, leads: list, data: dict, grid: dict) -> bytes:
     off = (block - 1) / 2.0
     lat_n_c = grid["lat_s"] + (ny - 1) * grid["dlat"] - (ny - ny2 * block) * grid["dlat"] - off * grid["dlat"]
     lon_w_c = grid["lon_w"] + off * grid["dlon"]
-    head = b"RGN3" + struct.pack(
-        ">qHHffffBH", int(run.timestamp()), nx2, ny2,
-        lat_n_c, lon_w_c, grid["dlat"] * block, grid["dlon"] * block, len(steps), 60,
-    )
+    if cfg["fmt"] == 3:  # gleichmäßig stündlich ab Laufzeit
+        head = b"RGN3" + struct.pack(
+            ">qHHffffBH", int(run.timestamp()), nx2, ny2,
+            lat_n_c, lon_w_c, grid["dlat"] * block, grid["dlon"] * block, len(steps), 60,
+        )
+    else:  # RGN4: Minuten ab Laufzeit je Zeitschritt
+        head = b"RGN4" + struct.pack(
+            ">qHHffffB", int(run.timestamp()), nx2, ny2,
+            lat_n_c, lon_w_c, grid["dlat"] * block, grid["dlon"] * block, len(steps),
+        ) + struct.pack(f">{len(leads)}H", *[m * 60 for m in leads])
     return head + b"".join(steps)
 
 
@@ -290,7 +303,7 @@ def _exists(url: str) -> bool:
 def url_for(model: str, run: dt.datetime, lead: int, par: str = "t_2m") -> str:
     cfg = MODELS[model]
     return f"{BASE}/" + cfg["path"].format(
-        hh=run.strftime("%H"), run=run.strftime("%Y%m%d%H"), lead=lead, par=par)
+        hh=run.strftime("%H"), run=run.strftime("%Y%m%d%H"), lead=lead, par=par, PAR=par.upper())
 
 
 def latest_complete_run(model: str, now: dt.datetime) -> dt.datetime:
@@ -367,11 +380,11 @@ def main() -> int:
         return 0
 
     t0 = time.time()
-    if a.model == "wx":
+    if a.model in ("wx", "wxeu"):
         data = {}
         for par in WX_PARAMS:
-            data[par], grid = load_run("wx", run, a.local, par)
-        raw = build_wx(run, cfg["leads"], data, grid)
+            data[par], grid = load_run(a.model, run, a.local, par)
+        raw = build_wx(run, cfg["leads"], data, grid, a.model)
     else:
         fields, grid = load_run(a.model, run, a.local)
         raw = build(a.model, run, cfg["leads"], fields, grid)
@@ -382,7 +395,7 @@ def main() -> int:
         f.write(gz)
     os.replace(tmp, os.path.join(a.out, cfg["out"]))
     meta = dict(
-        run=run_text, run_epoch=int(run.timestamp()), steps=len(cfg["leads"]) - (0 if a.model == "wx" else 1),
+        run=run_text, run_epoch=int(run.timestamp()), steps=len(cfg["leads"]) - (0 if a.model in ("wx", "wxeu") else 1),
         bytes=len(gz), created=dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
     with open(os.path.join(a.out, cfg["meta"]), "w") as f:
