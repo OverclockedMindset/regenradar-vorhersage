@@ -47,6 +47,12 @@ jobs:
         continue-on-error: true
         run: python icon_d2_job.py --model eu --out out
 
+      - name: ICON-D2 Wetterfelder holen (Temperatur, Wind, Wolken)
+        if: github.event.schedule != '0 5 * * 1'
+        # Ein Fehler hier soll die Regenvorhersage nicht verhindern
+        continue-on-error: true
+        run: python icon_d2_job.py --model wx --out out
+
       - name: Auf das Webhosting hochladen
         if: github.event.schedule != '0 5 * * 1'
         env:
